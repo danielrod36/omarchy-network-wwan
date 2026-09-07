@@ -44,9 +44,14 @@ This repository is the plugin directory itself; the layout mirrors upstream:
 
 ```
 manifest.json   # id: daniel.network (renamed from omarchy.network)
+
 Model.js        # pure logic: probe script, parsers, icons, labels
 Panel.qml       # bar widget + popup panel
 ```
+
+Offered upstream as [omacom/omarchy#10722](https://github.com/omacom/omarchy/pull/10722);
+HEAD tracks that branch (rebased onto quattro's captive-portal rework).
+Once merged there, this clone can be retired in favour of the stock widget.
 
 ## Tracking upstream
 
