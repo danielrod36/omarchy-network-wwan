@@ -1,10 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "omarchy.network",
-  "name": "Network",
-  "version": "1.0.0",
+  "id": "daniel.network",
+  "name": "My Network",
+  "version": "1.1.0",
   "author": "Omarchy",
-  "description": "Wi-Fi list and connection state",
   "kinds": [
     "bar-widget"
   ],
@@ -12,9 +11,12 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "Network",
-    "description": "Wi-Fi list and connection state",
+    "displayName": "My Network",
+    "description": "Wi-Fi, cellular (LTE/5G), and connection state",
     "category": "Network",
     "allowMultiple": false
+  },
+  "omarchy": {
+    "clonedFrom": "omarchy.network"
   }
 }
