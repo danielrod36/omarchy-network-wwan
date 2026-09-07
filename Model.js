@@ -14,9 +14,27 @@ function wifiIconFor(strength) {
   return icons[index]
 }
 
-function connectionIcon(kind, signalStrength) {
-  if (kind === "wifi") return wifiIconFor(signalStrength)
-  if (kind === "ethernet") return "󰈀"
+// A known plain-HTTP endpoint lets the network redirect the browser to its
+// login page. Never execute or automatically open an untrusted Location header.
+var captivePortalUrl = "http://ping.archlinux.org/nm-check.txt"
+
+function connectivityState(kind, connectivity, states, checksEnabled) {
+  if (kind === "disconnected") return "none"
+  // Ignore stale cached results when the operator has disabled probing.
+  if (!checksEnabled) return "unknown"
+  if (connectivity === states.Portal) return "portal"
+  if (connectivity === states.Limited) return "limited"
+  if (connectivity === states.Full) return "full"
+  if (connectivity === states.None) return "none"
+  return "unknown"
+}
+
+function connectionIcon(kind, signalStrength, connectivity) {
+  var restricted = connectivity === "portal" || connectivity === "limited"
+  if (kind === "wifi") return restricted ? "󰤩" : wifiIconFor(signalStrength)
+  if (kind === "ethernet") return restricted ? "󰈂" : "󰈀"
+  // Cellular has no separate blocked glyph yet; the signal bars stand in
+  // either way, and the hero meta carries the restriction state.
   if (kind === "wwan") return wwanIconFor(signalStrength)
   return "󰤮"
 }
@@ -443,6 +461,8 @@ function shouldRepromptPassphrase(reason, needsCredentials, reasons) {
 if (typeof module !== "undefined") {
   module.exports = {
     parseNetworkStatus: parseNetworkStatus,
+    connectivityState: connectivityState,
+    captivePortalUrl: captivePortalUrl,
     wifiIconFor: wifiIconFor,
     connectionIcon: connectionIcon,
     formatHeaderSpeed: formatHeaderSpeed,

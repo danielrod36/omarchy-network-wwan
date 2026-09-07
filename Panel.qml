@@ -132,9 +132,9 @@ Panel {
   property bool cursorActive: false
 
   // Keyboard focus zone for the panel. j/k crosses row boundaries:
-  // header actions ⇄ band ⇄ DNS row ⇄ Wi-Fi networks. h/l move
+  // header actions ⇄ portal ⇄ band ⇄ DNS ⇄ cellular ⇄ Wi-Fi networks. h/l move
   // within header actions, band pills, or DNS providers.
-  property string focusSection: "dns"  // "header" | "band" | "dns" | "wifi"
+  property string focusSection: "dns"  // "header" | "portal" | "band" | "dns" | "cellular" | "wifi"
   property int headerIndex: 0
   readonly property bool canDisconnect: !!connectedWifiNetwork
   readonly property bool headerHasDisconnect: false
@@ -280,6 +280,8 @@ Panel {
     // network target; both cards are their own plugins now.
     function showQr() { root.summonWifiQr(true) }
     function speedTest() { root.summonSpeedTest() }
+    function openCaptivePortal() { root.openCaptivePortal() }
+    function checkConnectivity() { root.checkConnectivity() }
   }
 
   function activateHeader() {
@@ -383,11 +385,11 @@ Panel {
       refresh(true)
       selectedIndex = wifiNetworks.length > 0 ? 0 : -1
       wifiActionFocused = false
-      focusSection = wifiNetworks.length > 0 ? "wifi" : "dns"
+      focusSection = hasCaptivePortal ? "portal" : (wifiNetworks.length > 0 ? "wifi" : "dns")
       var idx = dnsProviders.indexOf(dnsProvider)
       dnsIndex = idx >= 0 ? idx : 0
       syncBandIndex()
-      cursorActive = false
+      cursorActive = hasCaptivePortal
     } else {
       // Drop a restart armed by this open: without it a close/reopen inside
       // the 100ms window reuses the running timer and re-enables the scanner
@@ -496,8 +498,8 @@ Panel {
   // Bar pill state, derived from the native NetworkManager service so the
   // icon reflects connection changes without polling. Wired is preferred
   // when both are up, matching the default-route device. Cellular comes
-  // from the polled probe instead (see the wwan property above) because
-  // the native service has no modem device type.
+  // from the polled wwan probe instead (see the wwan property above)
+  // because the native service has no modem device type.
   readonly property var wiredDevice: findDevice(DeviceType.Wired)
   readonly property string kind: {
     if (wiredDevice && wiredDevice.connected) return "ethernet"
@@ -527,7 +529,60 @@ Panel {
     Quickshell.execDetached(["bash", "-c", "printf %s " + Util.shellQuote(value) + " | wl-copy"])
   }
 
-  readonly property string icon: Model.connectionIcon(kind, signalStrength)
+  // NetworkManager performs the HTTP probe (including unexpected page bodies,
+  // not just redirects). Consume its native notifications rather than running
+  // a second curl loop or mistaking an ordinary timeout for a captive portal.
+  readonly property bool connectivityChecksEnabled: networkManagerAvailable
+    && Networking.canCheckConnectivity && Networking.connectivityCheckEnabled
+  readonly property string connectivity: Model.connectivityState(kind, Networking.connectivity, {
+    Portal: NetworkConnectivity.Portal, Limited: NetworkConnectivity.Limited,
+    Full: NetworkConnectivity.Full, None: NetworkConnectivity.None
+  }, connectivityChecksEnabled)
+  readonly property bool hasCaptivePortal: connectivity === "portal"
+  readonly property bool restricted: hasCaptivePortal || connectivity === "limited"
+  readonly property string icon: Model.connectionIcon(kind, signalStrength, connectivity)
+  readonly property string connectionKey: kind === "wifi" && wifiDevice && connectedWifiNetwork
+    ? kind + ":" + wifiDevice.name + ":" + connectedWifiNetwork.name
+    : (kind === "wwan" && wwan.netdev ? kind + ":" + wwan.netdev
+    : (kind === "ethernet" && wiredDevice ? kind + ":" + wiredDevice.name : ""))
+
+  onConnectionKeyChanged: Qt.callLater(checkConnectivity)
+  onConnectivityChecksEnabledChanged: Qt.callLater(checkConnectivity)
+  onHasCaptivePortalChanged: {
+    if (hasCaptivePortal && opened && passwordSsid === "") {
+      focusSection = "portal"
+      cursorActive = true
+    } else if (!hasCaptivePortal && focusSection === "portal") {
+      focusSection = headerActionCount > 0 ? "header" : "dns"
+      headerIndex = 0
+    }
+  }
+  onRestrictedChanged: {
+    connectionPhraseSwap.stop()
+    heroMeta.opacity = 1.0
+  }
+
+  function checkConnectivity() {
+    if (connectivityChecksEnabled && kind !== "disconnected") Networking.checkConnectivity()
+  }
+
+  function openCaptivePortal() {
+    if (!hasCaptivePortal) return
+    // Explicit user action only. argv (not a shell string), and a fixed HTTP
+    // URL: let the browser handle the redirect without trusting portal input.
+    Quickshell.execDetached(["omarchy-launch-browser", Model.captivePortalUrl])
+    close()
+  }
+
+  // Keep checking while login is needed, even with the panel closed in favour
+  // of the browser. Normal connected operation relies on NM's own schedule.
+  Timer {
+    id: connectivityPoll
+    interval: 10000
+    repeat: true
+    running: root.restricted && root.connectivityChecksEnabled
+    onTriggered: root.checkConnectivity()
+  }
 
   // The share card is its own panel plugin (omarchy.wifiqr) so a replacement
   // design can take it over; summon() routes to whichever implementation is
@@ -546,6 +601,7 @@ Panel {
   }
 
   function refresh(scanWifi) {
+    checkConnectivity()
     if (scanWifi === undefined) scanWifi = false
     if (!detailsProc.running) detailsProc.running = true
     if (!dnsProc.running) {
@@ -1027,7 +1083,7 @@ Panel {
   Timer {
     id: connectionPhraseTimer
     interval: 2800
-    running: root.opened && (root.info.type === "ethernet" || root.info.type === "wwan" || (root.info.type === "wifi" && root.canDisconnect))
+    running: root.opened && !root.restricted && (root.info.type === "ethernet" || root.info.type === "wwan" || (root.info.type === "wifi" && root.canDisconnect))
     repeat: true
     onTriggered: connectionPhraseSwap.restart()
   }
@@ -1084,6 +1140,9 @@ Panel {
     anchors.fill: parent
     bar: root.bar
     text: root.icon
+    active: root.restricted
+    tooltipText: root.hasCaptivePortal ? "Sign in to this network"
+      : (root.restricted ? "Limited internet access" : "")
 
     onPressed: function(b) {
       if (root.opened) root.close()
@@ -1127,16 +1186,25 @@ Panel {
           if (dy >= 0) return
         }
         if (dy !== 0) {
-          // Vertical order is header ⇄ band ⇄ DNS ⇄ wifi, with the band section
-          // dropping out of the chain entirely when it isn't on screen.
+          // Hidden sections drop out of the keyboard chain entirely.
           if (root.focusSection === "header") {
             if (dy > 0) {
-              if (root.canSelectBand) {
+              if (root.hasCaptivePortal) {
+                root.focusSection = "portal"
+              } else if (root.canSelectBand) {
                 root.focusSection = "band"
                 root.bandAutoFocused = true
               } else {
                 root.focusSection = "dns"
               }
+            }
+          } else if (root.focusSection === "portal") {
+            if (dy < 0 && root.headerActionCount > 0) {
+              root.focusSection = "header"
+              root.headerIndex = 0
+            } else if (dy > 0) {
+              root.focusSection = root.canSelectBand ? "band" : "dns"
+              root.bandAutoFocused = true
             }
           } else if (root.focusSection === "band") {
             // Automatic on the header line, then the pills -- which collapse
@@ -1144,6 +1212,8 @@ Panel {
             if (dy < 0) {
               if (!root.bandAutoFocused) {
                 root.bandAutoFocused = true
+              } else if (root.hasCaptivePortal) {
+                root.focusSection = "portal"
               } else if (root.headerActionCount > 0) {
                 root.focusSection = "header"
                 root.headerIndex = 0
@@ -1155,13 +1225,14 @@ Panel {
             }
           } else if (root.focusSection === "dns") {
             // k from DNS moves up into the band section when it's on screen,
-            // then the disconnect button; otherwise stays put. j drops into
-            // the cellular list, then the wifi list if there's anywhere to
-            // land.
+            // then the disconnect button; otherwise stays put. j drops into the
+            // wifi list if there's anywhere to land.
             if (dy < 0) {
               if (root.canSelectBand) {
                 root.focusSection = "band"
                 root.bandAutoFocused = !root.bandPillsVisible
+              } else if (root.hasCaptivePortal) {
+                root.focusSection = "portal"
               } else if (root.headerActionCount > 0) {
                 root.focusSection = "header"
                 root.headerIndex = 0
@@ -1181,7 +1252,6 @@ Panel {
             } else if (root.wwanIndex < root.wwanProfiles.length - 1) {
               root.wwanIndex = Math.max(0, Math.min(root.wwanProfiles.length - 1, root.wwanIndex + dy))
             } else if (root.wifiNetworks.length > 0) {
-              // j off the last profile continues into the wifi list below.
               root.focusSection = "wifi"
               if (root.selectedIndex < 0) root.selectedIndex = 0
             }
@@ -1211,6 +1281,7 @@ Panel {
       onActivateRequested: {
         if (root.cursorActive) {
           if (root.focusSection === "header") root.activateHeader()
+          else if (root.focusSection === "portal") root.openCaptivePortal()
           else if (root.focusSection === "band") root.activateBand()
           else if (root.focusSection === "dns") root.activateDns()
           else if (root.focusSection === "cellular") root.activateWwanSelected()
@@ -1241,7 +1312,7 @@ Panel {
           id: heroIcon
           textFormat: Text.PlainText
           text: root.icon
-          color: root.bar.foreground
+          color: root.restricted ? root.bar.urgent : root.bar.foreground
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.display
           opacity: root.networkManagerAvailable ? 1.0 : 0.5
@@ -1341,6 +1412,9 @@ Panel {
             width: parent.width
 
             readonly property string title: {
+              // The HTTP restriction does not undo association. Show the live
+              // SSID even before route/details polling has returned anything.
+              if (root.kind === "wifi" && root.connectedWifiNetwork) return root.connectedWifiNetwork.name || "Wi-Fi"
               if (root.info.type === "wifi") return root.info.ssid || "Wi-Fi"
               if (root.info.type === "ethernet") return "Ethernet"
               if (root.info.type === "wwan") return root.wwanTitle
@@ -1361,6 +1435,8 @@ Panel {
             textFormat: Text.PlainText
             width: parent.width
             text: {
+              if (root.hasCaptivePortal) return "SIGN-IN REQUIRED"
+              if (root.restricted) return "LIMITED INTERNET ACCESS"
               if (root.info.type === "wifi") {
                 if (root.canDisconnect) return root.connectionPhrase.toUpperCase()
                 if (root.kind === "disconnected") return "NOT CONNECTED"
@@ -1372,7 +1448,7 @@ Panel {
               return ""
             }
             visible: text !== ""
-            color: Qt.darker(root.bar.foreground, 1.4)
+            color: root.restricted ? root.bar.urgent : Qt.darker(root.bar.foreground, 1.4)
             font.family: root.bar.fontFamily
             font.pixelSize: Style.font.caption
             font.bold: true
@@ -1381,6 +1457,43 @@ Panel {
           }
         }
 
+      }
+
+      Column {
+        visible: root.hasCaptivePortal
+        width: parent.width
+        spacing: Style.space(6)
+
+        Button {
+          id: portalAction
+          width: parent.width
+          text: "Open Captive Portal"
+          iconText: "󰏌"
+          foreground: root.bar.urgent
+          accent: root.bar.urgent
+          fontFamily: root.bar.fontFamily
+          verticalPadding: Style.space(10)
+          bordered: true
+          active: true
+          hasCursor: root.cursorActive && root.focusSection === "portal"
+          onHovered: function(on) {
+            if (!on) return
+            root.cursorActive = true
+            root.focusSection = "portal"
+          }
+          onClicked: root.openCaptivePortal()
+        }
+
+        Text {
+          width: parent.width
+          text: "Sign in or accept this network’s terms to access the internet."
+          textFormat: Text.PlainText
+          wrapMode: Text.WordWrap
+          color: root.bar.foreground
+          opacity: 0.7
+          font.family: root.bar.fontFamily
+          font.pixelSize: Style.font.bodySmall
+        }
       }
 
       // Connection details: transfer metrics first, then IP/Gateway.
@@ -1623,6 +1736,8 @@ Panel {
         }
       }
 
+
+
       // Cellular profiles (only if a modem answered the probe and has
       // profiles to list; the hero's radio switch still surfaces the modem
       // itself when there are none).
@@ -1660,7 +1775,6 @@ Panel {
           }
         }
       }
-
 
       // Wi-Fi networks (only if a Wi-Fi station is available).
       PanelSeparator {
@@ -1860,6 +1974,7 @@ Panel {
       if (isBusy && root.actionKind === "disconnect") return "Disconnecting…"
       if (isBusy && root.actionKind === "forget") return "Forgetting…"
       if (isFailed) return root.failureReason || "Failed"
+      if (isConnected && root.kind === "wifi" && root.hasCaptivePortal) return "Sign-in required"
       if (isConnected) return "Connected"
       return ""
     }
@@ -1867,6 +1982,7 @@ Panel {
     readonly property color statusColor: {
       if (isFailed) return root.bar.urgent
       if (isBusy) return root.bar.foreground
+      if (isConnected && root.kind === "wifi" && root.hasCaptivePortal) return root.bar.urgent
       if (isConnected) return root.bar.foreground
       return Qt.darker(root.bar.foreground, 1.5)
     }
@@ -1921,7 +2037,8 @@ Panel {
       Text {
         id: networkIcon
         textFormat: Text.PlainText
-        text: row.net ? root.wifiIconFor(row.net.signal) : ""
+        text: row.net ? Model.connectionIcon("wifi", row.net.signal,
+          row.isConnected && root.kind === "wifi" ? root.connectivity : "") : ""
         color: row.statusColor
         font.family: root.bar.fontFamily
         font.pixelSize: Style.font.title
@@ -2159,13 +2276,13 @@ Panel {
       if (root.wwan.state === "searching") return "Searching…"
       return ""
     }
-    implicitHeight: crowBody.implicitHeight
 
     readonly property color statusColor: {
       if (isBusy || isConnected) return root.bar.foreground
       return Qt.darker(root.bar.foreground, 1.5)
     }
 
+    implicitHeight: crowBody.implicitHeight
     hasCursor: root.cursorActive && isSelected
     current: isConnected
     foreground: root.bar.foreground
@@ -2233,9 +2350,10 @@ Panel {
         }
         Text {
           textFormat: Text.PlainText
+          // An empty status collapses on its own: no doLayout lines means
+          // zero height, so there is no separate visible/height dance to
+          // keep the row one line tall (and none of its binding churn).
           text: crow.statusText
-          visible: crow.statusText !== ""
-          height: visible ? implicitHeight : 0
           color: crow.statusColor
           font.family: root.bar.fontFamily
           font.pixelSize: Style.font.caption
